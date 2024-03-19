@@ -15,11 +15,12 @@ import logging
 import time
 import random
 from datetime import datetime
-from asyncua import Server, ua
+from asyncua import Server, ua,uamethod
 from asyncua.common.ua_utils import value_to_datavalue
 from asyncua.common.instantiate_util import instantiate
 from importer import CSV_IMPORTER
 from datavalue_parser import parse_to_datavalue
+
 
 logging.basicConfig(level=logging.WARNING)
 _logger = logging.getLogger('asyncua')
@@ -28,6 +29,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 build_date = datetime(2022, 6, 15, 17, 00)
 time_value = None
+server = Server()
+
 
 async def import_xml_file(server, file_path, strict_mode=True):
     """
@@ -46,7 +49,6 @@ async def import_xml_file(server, file_path, strict_mode=True):
         
 async def setup_server():
     print("Start setup...")
-    server = Server()
     server.name = "umati-Sample-Server-asyncio"
     await server.init()
     await server.set_build_info(
@@ -93,7 +95,8 @@ async def import_models(server):
         ("src/models/WWM_Full.xml", True),
         ("src/models/umati_opc40077_sample_instance.xml", True),
         ("deps/UA-Nodeset/PackML/Opc.Ua.PackML.NodeSet2.xml", True),
-        ("nodeset/Opc.Ua.Scales.NodeSet2.xml", True)
+        ("nodeset/Opc.Ua.Scales.NodeSet2.xml", True),
+        ("nodeset/kaffeemaschine.xml", True)
     ]
     
     # missing namespaces
@@ -135,6 +138,25 @@ async def main():
 
     truck_node = await create_mining_instance(server)
     await init_truck_identification_values(server, truck_node)
+    
+    c_idx = await server.get_namespace_index('http://interop4x.de/coffee')
+    coffe_machine_node = await server.nodes.objects.get_child([f"{c_idx}:coffee_2000"])
+    hopper = await coffe_machine_node.get_child(f"{c_idx}:Wasserbehaelter")
+    cook_method_node = await coffe_machine_node.get_child(f"{c_idx}:KaffeeZubereiten")
+    cook_tea_method_node = await coffe_machine_node.get_child(f"{c_idx}:HeisswasserZubereiten")
+    server.link_method(cook_method_node, cookCoffee)
+    server.link_method(cook_tea_method_node, cookTea)
+    
+    water = await coffe_machine_node.get_child([f"{c_idx}:Wasserbehaelter", f"{c_idx}:Fuellstand"])
+    beans = await coffe_machine_node.get_child([f"{c_idx}:Bohnenbehaelter1", f"{c_idx}:Fuellstand"])
+    water_value = await water.read_value()
+    water_value = 10.0
+    await water.write_value(water_value)
+    beans_value = await beans.read_value()
+    beans_value = 3.0
+    await beans.write_value(beans_value)
+    counter = await coffe_machine_node.get_child([ f"{c_idx}:ZaehlerTassenZubereitet"])
+    await counter.write_value(1)
 
 
     time_value = time.time()
@@ -159,6 +181,7 @@ async def main():
             for row in data:
                 await updateSimpleScale(server,scale_node)
                 await update_truck_values(server, truck_node,i)
+                await updatecoffeemachine(server)
                 i = (1 + i) % 62
                 await asyncio.sleep(1)
                 for item in row:
@@ -211,7 +234,7 @@ async def create_scale_instance(server):
     displayname = ua.LocalizedText("mySimpleScale")
     machines_node = await server.nodes.objects.get_child(f"{machinery_idx}:Machines")
 
-    await instantiate(machines_node, simpleScale_type_node, bname=f"{idx}:mySimpleScale", dname=displayname)
+    await instantiate(machines_node, simpleScale_type_node, bname=f"{idx}:mySimpleScale", dname=displayname,idx=idx)
     scale_node = await server.nodes.objects.get_child([f"{machinery_idx}:Machines",f"{idx}:mySimpleScale"])
     print(scale_node)
     return scale_node
@@ -236,6 +259,57 @@ async def updateSimpleScale(server, scale_node):
     await currentWeight.write_value(value)
 
 
+@uamethod
+async def cookTea(parent):
+    print("cooktea")
+    idx = parent.NamespaceIndex
+    machine = server.get_node(parent)
+    water = await machine.get_child([f"{idx}:Wasserbehaelter", f"{idx}:Fuellstand"])
+    ready_node = await machine.get_child([f"{idx}:KaffeeFertig"])
+
+    water_value = await water.read_value()
+    water_value = water_value - 0.0218
+    await water.write_value(water_value)
+    return None
+
+@uamethod
+async def cookCoffee(parent):
+    print("cookCoffee")
+    idx = parent.NamespaceIndex
+    machine = server.get_node(parent)
+    water = await machine.get_child([f"{idx}:Wasserbehaelter", f"{idx}:Fuellstand"])
+    beans = await machine.get_child([f"{idx}:Bohnenbehaelter1", f"{idx}:Fuellstand"])
+    
+    ready_node = await machine.get_child([ f"{idx}:KaffeeFertig"])
+    await ready_node.write_value(ua.Variant(True, ua.VariantType.Boolean))
+
+    counter = await machine.get_child([ f"{idx}:ZaehlerTassenZubereitet"])
+
+    water_value = await water.read_value()
+    water_value = water_value - 0.0198 + (random.uniform(0.0, 0.0098))
+    await water.write_value(water_value)
+    beans_value = await beans.read_value()
+    beans_value = beans_value - 0.017 + (random.uniform(0.0, 0.0098))
+    await beans.write_value(beans_value)
+    counter_value = await counter.read_value()
+    await counter.write_value(counter_value + 1)
+    return None
+
+
+async def updatecoffeemachine(server):
+    idx = await server.get_namespace_index('http://interop4x.de/coffee')
+    coffe_machine_node = await server.nodes.objects.get_child([f"{idx}:coffee_2000"])
+    hopper = await coffe_machine_node.get_child(f"{idx}:Wasserbehaelter")
+    temperature = await hopper.get_child(f"{idx}:Wassertemperatur")
+    value = await temperature.read_value()
+    value =  (value + 96.7 + (random.uniform(0.3,4.04))) /2
+    await temperature.write_value(value)
+    ready_node = await coffe_machine_node.get_child([ f"{idx}:KaffeeFertig"])
+    if ready_node.read_value() == True:
+        await asyncio.sleep(2)
+        await ready_node.write_value(ua.Variant(False, ua.VariantType.Boolean))
+
+
 async def create_mining_instance(server):
     print("Create Minng example")
     idx = await server.register_namespace("http://interop4x.de/example/mining")
@@ -247,7 +321,7 @@ async def create_mining_instance(server):
     displayname = ua.LocalizedText("myTruck")
     machines_node = await server.nodes.objects.get_child(f"{machinery_idx}:Machines")
 
-    await instantiate(machines_node, HaulageMachineType_node, bname=f"{idx}:myTruck", dname=displayname)
+    await instantiate(machines_node, HaulageMachineType_node, bname=f"{idx}:myTruck", dname=displayname, idx=idx)
     truck_node = await server.nodes.objects.get_child([f"{machinery_idx}:Machines", f"{idx}:myTruck"])
     return truck_node
 
@@ -256,6 +330,10 @@ async def init_truck_identification_values(server, truck_node):
     mining_general_idx = await server.get_namespace_index('http://opcfoundation.org/UA/Mining/General/')
     manufacturer = await truck_node.get_child([f"{mining_general_idx}:MiningEquipmentIdentification", f"{di_idx}:Manufacturer"])
     await manufacturer.write_value(ua.LocalizedText("interop4X - FVA GmbH"))
+    AssetId = await truck_node.get_child([f"{mining_general_idx}:MiningEquipmentIdentification", f"{di_idx}:AssetId"])
+    await AssetId.write_value(("FN-MN-1234"))
+    Model = await truck_node.get_child([f"{mining_general_idx}:MiningEquipmentIdentification", f"{di_idx}:Model"])
+    await Model.write_value(ua.LocalizedText("Sample_Truck_Model_1"))
     serialNumber = await truck_node.get_child([f"{mining_general_idx}:MiningEquipmentIdentification", f"{di_idx}:SerialNumber"])
     await serialNumber.write_value(("t-12-34-56"))
     productInstanceUri = await truck_node.get_child([f"{mining_general_idx}:MiningEquipmentIdentification", f"{di_idx}:ProductInstanceUri"])
